@@ -1,0 +1,617 @@
+name: Build Keyboard APK
+
+# طريقة التشغيل: Actions ثم Build Keyboard APK ثم Run workflow
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Create project files
+        run: |
+          cat > "settings.gradle" <<'KEOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "KlishaKeyboard"
+          include ':app'
+          KEOF
+          cat > "build.gradle" <<'KEOF'
+          plugins {
+              id 'com.android.application' version '8.5.2' apply false
+          }
+          KEOF
+          cat > "gradle.properties" <<'KEOF'
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          android.useAndroidX=false
+          android.nonTransitiveRClass=true
+          KEOF
+          mkdir -p "app"
+          cat > "app/build.gradle" <<'KEOF'
+          plugins {
+              id 'com.android.application'
+          }
+
+          android {
+              namespace 'com.klisha.keyboard'
+              compileSdk 34
+
+              defaultConfig {
+                  applicationId 'com.klisha.keyboard'
+                  minSdk 24
+                  targetSdk 34
+                  versionCode 1
+                  versionName '1.0'
+              }
+
+              buildTypes {
+                  release {
+                      minifyEnabled false
+                  }
+              }
+
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+          }
+          KEOF
+          mkdir -p "app/src/main"
+          cat > "app/src/main/AndroidManifest.xml" <<'KEOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <application
+                  android:allowBackup="true"
+                  android:icon="@mipmap/ic_launcher"
+                  android:label="@string/app_name"
+                  android:supportsRtl="true"
+                  android:theme="@android:style/Theme.Material.Light.NoActionBar">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+
+                  <service
+                      android:name=".KlishaIME"
+                      android:exported="true"
+                      android:label="@string/ime_name"
+                      android:permission="android.permission.BIND_INPUT_METHOD">
+                      <intent-filter>
+                          <action android:name="android.view.InputMethod" />
+                      </intent-filter>
+                      <meta-data
+                          android:name="android.view.im"
+                          android:resource="@xml/method" />
+                  </service>
+
+              </application>
+          </manifest>
+          KEOF
+          mkdir -p "app/src/main/res/xml"
+          cat > "app/src/main/res/xml/method.xml" <<'KEOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <input-method xmlns:android="http://schemas.android.com/apk/res/android"
+              android:settingsActivity="com.klisha.keyboard.MainActivity" />
+          KEOF
+          mkdir -p "app/src/main/res/values"
+          cat > "app/src/main/res/values/strings.xml" <<'KEOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <string name="app_name">ليفاي القديس</string>
+              <string name="ime_name">ليفاي القديس</string>
+          </resources>
+          KEOF
+          mkdir -p "app/src/main/java/com/klisha/keyboard"
+          cat > "app/src/main/java/com/klisha/keyboard/KlishaIME.java" <<'KEOF'
+          package com.klisha.keyboard;
+
+          import android.content.SharedPreferences;
+          import android.graphics.Color;
+          import android.graphics.drawable.GradientDrawable;
+          import android.inputmethodservice.InputMethodService;
+          import android.os.Handler;
+          import android.os.Looper;
+          import android.view.KeyEvent;
+          import android.view.MotionEvent;
+          import android.view.View;
+          import android.view.inputmethod.EditorInfo;
+          import android.view.inputmethod.InputConnection;
+          import android.widget.Button;
+          import android.widget.LinearLayout;
+          import android.widget.Toast;
+
+          import java.util.ArrayList;
+          import java.util.List;
+          import java.util.Random;
+
+          public class KlishaIME extends InputMethodService {
+
+              private static final String[][] AR = {
+                      {"ض", "ص", "ث", "ق", "ف", "غ", "ع", "ه", "خ", "ح", "ج"},
+                      {"ش", "س", "ي", "ب", "ل", "ا", "ت", "ن", "م", "ك", "ط"},
+                      {"ئ", "ء", "ؤ", "ر", "ى", "ة", "و", "ز", "ظ", "د", "ذ"}
+              };
+              private static final String[][] EN = {
+                      {"q", "w", "e", "r", "t", "y", "u", "i", "o", "p"},
+                      {"a", "s", "d", "f", "g", "h", "j", "k", "l"},
+                      {"z", "x", "c", "v", "b", "n", "m"}
+              };
+              private static final String[] NUMS = {"1", "2", "3", "4", "5", "6", "7", "8", "9", "0"};
+
+              private static final int COLOR_BG = 0xFF161B20;
+              private static final int COLOR_KEY = 0xFF2A323A;
+              private static final int COLOR_FUNC = 0xFF3B4650;
+              private static final int COLOR_ACCENT = 0xFF0E7C7B;
+
+              private LinearLayout root;
+              private boolean arabic = true;
+              private boolean shift = false;
+              private final Handler handler = new Handler(Looper.getMainLooper());
+              private final Random random = new Random();
+
+              @Override
+              public boolean onEvaluateFullscreenMode() {
+                  return false;
+              }
+
+              @Override
+              public View onCreateInputView() {
+                  root = new LinearLayout(this);
+                  root.setOrientation(LinearLayout.VERTICAL);
+                  root.setBackgroundColor(COLOR_BG);
+                  root.setPadding(dp(3), dp(4), dp(3), dp(4));
+                  buildKeys();
+                  return root;
+              }
+
+              private int dp(float v) {
+                  return (int) (v * getResources().getDisplayMetrics().density + 0.5f);
+              }
+
+              private LinearLayout makeRow() {
+                  LinearLayout row = new LinearLayout(this);
+                  row.setOrientation(LinearLayout.HORIZONTAL);
+                  row.setLayoutDirection(View.LAYOUT_DIRECTION_LTR);
+                  row.setLayoutParams(new LinearLayout.LayoutParams(
+                          LinearLayout.LayoutParams.MATCH_PARENT,
+                          LinearLayout.LayoutParams.WRAP_CONTENT));
+                  return row;
+              }
+
+              private Button makeKey(String label, float weight, int color) {
+                  Button b = new Button(this);
+                  b.setText(label);
+                  b.setAllCaps(false);
+                  b.setTextColor(Color.WHITE);
+                  b.setTextSize(18);
+                  b.setPadding(0, 0, 0, 0);
+                  b.setMinWidth(0);
+                  b.setMinimumWidth(0);
+                  b.setMinHeight(0);
+                  b.setMinimumHeight(0);
+                  b.setStateListAnimator(null);
+                  GradientDrawable bg = new GradientDrawable();
+                  bg.setColor(color);
+                  bg.setCornerRadius(dp(6));
+                  b.setBackground(bg);
+                  LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, dp(46), weight);
+                  lp.setMargins(dp(2), dp(3), dp(2), dp(3));
+                  b.setLayoutParams(lp);
+                  return b;
+              }
+
+              private void addChar(LinearLayout row, String label) {
+                  final String shown = (!arabic && shift) ? label.toUpperCase() : label;
+                  Button b = makeKey(shown, 1f, COLOR_KEY);
+                  b.setOnClickListener(new View.OnClickListener() {
+                      @Override
+                      public void onClick(View v) {
+                          commit(shown);
+                          if (shift) {
+                              shift = false;
+                              buildKeys();
+                          }
+                      }
+                  });
+                  row.addView(b);
+              }
+
+              private void buildKeys() {
+                  root.removeAllViews();
+                  String[][] rows = arabic ? AR : EN;
+
+                  LinearLayout numRow = makeRow();
+                  for (String n : NUMS) {
+                      final String digit = n;
+                      Button b = makeKey(digit, 1f, COLOR_KEY);
+                      b.setOnClickListener(new View.OnClickListener() {
+                          @Override
+                          public void onClick(View v) {
+                              commit(digit);
+                          }
+                      });
+                      numRow.addView(b);
+                  }
+                  root.addView(numRow);
+
+                  for (int i = 0; i < rows.length; i++) {
+                      LinearLayout row = makeRow();
+                      if (!arabic && i == 2) {
+                          Button sh = makeKey(shift ? "⇧" : "⇪", 1.4f, shift ? COLOR_ACCENT : COLOR_FUNC);
+                          sh.setOnClickListener(new View.OnClickListener() {
+                              @Override
+                              public void onClick(View v) {
+                                  shift = !shift;
+                                  buildKeys();
+                              }
+                          });
+                          row.addView(sh);
+                      }
+                      for (String k : rows[i]) {
+                          addChar(row, k);
+                      }
+                      root.addView(row);
+                  }
+
+                  LinearLayout bottom = makeRow();
+
+                  Button lang = makeKey(arabic ? "EN" : "عر", 1.2f, COLOR_FUNC);
+                  lang.setOnClickListener(new View.OnClickListener() {
+                      @Override
+                      public void onClick(View v) {
+                          arabic = !arabic;
+                          shift = false;
+                          buildKeys();
+                      }
+                  });
+                  bottom.addView(lang);
+
+                  Button klisha = makeKey("كليشة", 2f, COLOR_ACCENT);
+                  klisha.setOnClickListener(new View.OnClickListener() {
+                      @Override
+                      public void onClick(View v) {
+                          insertKlisha();
+                      }
+                  });
+                  bottom.addView(klisha);
+
+                  Button comma = makeKey(arabic ? "،" : ",", 1f, COLOR_KEY);
+                  comma.setOnClickListener(new View.OnClickListener() {
+                      @Override
+                      public void onClick(View v) {
+                          commit(arabic ? "،" : ",");
+                      }
+                  });
+                  bottom.addView(comma);
+
+                  Button space = makeKey(arabic ? "مسافة" : "space", 3f, COLOR_KEY);
+                  space.setOnClickListener(new View.OnClickListener() {
+                      @Override
+                      public void onClick(View v) {
+                          commit(" ");
+                      }
+                  });
+                  bottom.addView(space);
+
+                  Button dot = makeKey(".", 1f, COLOR_KEY);
+                  dot.setOnClickListener(new View.OnClickListener() {
+                      @Override
+                      public void onClick(View v) {
+                          commit(".");
+                      }
+                  });
+                  bottom.addView(dot);
+
+                  Button del = makeKey("⌫", 1.3f, COLOR_FUNC);
+                  attachRepeat(del);
+                  bottom.addView(del);
+
+                  Button enter = makeKey("↵", 1.3f, COLOR_FUNC);
+                  enter.setOnClickListener(new View.OnClickListener() {
+                      @Override
+                      public void onClick(View v) {
+                          handleEnter();
+                      }
+                  });
+                  bottom.addView(enter);
+
+                  root.addView(bottom);
+              }
+
+              private void commit(String text) {
+                  InputConnection ic = getCurrentInputConnection();
+                  if (ic != null) {
+                      ic.commitText(text, 1);
+                  }
+              }
+
+              private void deleteOne() {
+                  sendDownUpKeyEvents(KeyEvent.KEYCODE_DEL);
+              }
+
+              private void attachRepeat(Button b) {
+                  final Runnable repeat = new Runnable() {
+                      @Override
+                      public void run() {
+                          deleteOne();
+                          handler.postDelayed(this, 60);
+                      }
+                  };
+                  b.setOnTouchListener(new View.OnTouchListener() {
+                      @Override
+                      public boolean onTouch(View v, MotionEvent e) {
+                          int action = e.getActionMasked();
+                          if (action == MotionEvent.ACTION_DOWN) {
+                              deleteOne();
+                              handler.postDelayed(repeat, 400);
+                          } else if (action == MotionEvent.ACTION_UP
+                                  || action == MotionEvent.ACTION_CANCEL) {
+                              handler.removeCallbacks(repeat);
+                          }
+                          return true;
+                      }
+                  });
+              }
+
+              private void handleEnter() {
+                  EditorInfo ei = getCurrentInputEditorInfo();
+                  InputConnection ic = getCurrentInputConnection();
+                  if (ei != null && ic != null) {
+                      int action = ei.imeOptions & EditorInfo.IME_MASK_ACTION;
+                      boolean noEnterAction = (ei.imeOptions & EditorInfo.IME_FLAG_NO_ENTER_ACTION) != 0;
+                      if (!noEnterAction
+                              && action != EditorInfo.IME_ACTION_NONE
+                              && action != EditorInfo.IME_ACTION_UNSPECIFIED) {
+                          ic.performEditorAction(action);
+                          return;
+                      }
+                  }
+                  sendDownUpKeyEvents(KeyEvent.KEYCODE_ENTER);
+              }
+
+              // يدمج مفردات عشوائية من القائمة المحفوظة بالتطبيق، ويدخلها مرة وحدة بالضغطة
+              private void insertKlisha() {
+                  SharedPreferences sp = getSharedPreferences("klisha", MODE_PRIVATE);
+                  String raw = sp.getString("words", "");
+                  int per = sp.getInt("per", 40);
+
+                  List<String> words = new ArrayList<String>();
+                  for (String line : raw.split("\n")) {
+                      String t = line.trim();
+                      if (!t.isEmpty()) {
+                          words.add(t);
+                      }
+                  }
+                  if (words.isEmpty()) {
+                      Toast.makeText(this, "أضف مفردات من تطبيق ليفاي القديس أولاً",
+                              Toast.LENGTH_SHORT).show();
+                      return;
+                  }
+                  if (per < 1) {
+                      per = 1;
+                  }
+                  if (per > 2000) {
+                      per = 2000;
+                  }
+
+                  StringBuilder sb = new StringBuilder();
+                  int last = -1;
+                  for (int i = 0; i < per; i++) {
+                      int idx = random.nextInt(words.size());
+                      if (words.size() > 1 && idx == last) {
+                          idx = (idx + 1) % words.size();
+                      }
+                      if (i > 0) {
+                          sb.append(' ');
+                      }
+                      sb.append(words.get(idx));
+                      last = idx;
+                  }
+                  commit(sb.toString());
+              }
+          }
+          KEOF
+          mkdir -p "app/src/main/java/com/klisha/keyboard"
+          cat > "app/src/main/java/com/klisha/keyboard/MainActivity.java" <<'KEOF'
+          package com.klisha.keyboard;
+
+          import android.app.Activity;
+          import android.content.Intent;
+          import android.content.SharedPreferences;
+          import android.os.Bundle;
+          import android.provider.Settings;
+          import android.text.InputType;
+          import android.view.Gravity;
+          import android.view.View;
+          import android.view.inputmethod.InputMethodManager;
+          import android.widget.Button;
+          import android.widget.EditText;
+          import android.widget.LinearLayout;
+          import android.widget.ScrollView;
+          import android.widget.TextView;
+          import android.widget.Toast;
+
+          public class MainActivity extends Activity {
+
+              private int dp(float v) {
+                  return (int) (v * getResources().getDisplayMetrics().density + 0.5f);
+              }
+
+              private TextView label(String text, boolean bold) {
+                  TextView t = new TextView(this);
+                  t.setText(text);
+                  t.setTextSize(bold ? 18 : 15);
+                  t.setPadding(0, dp(12), 0, dp(4));
+                  if (bold) {
+                      t.setTypeface(t.getTypeface(), android.graphics.Typeface.BOLD);
+                  }
+                  return t;
+              }
+
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+                  final SharedPreferences sp = getSharedPreferences("klisha", MODE_PRIVATE);
+
+                  ScrollView scroll = new ScrollView(this);
+                  scroll.setLayoutDirection(View.LAYOUT_DIRECTION_RTL);
+
+                  LinearLayout box = new LinearLayout(this);
+                  box.setOrientation(LinearLayout.VERTICAL);
+                  box.setPadding(dp(16), dp(24), dp(16), dp(24));
+                  scroll.addView(box);
+
+                  TextView title = label("ليفاي القديس", true);
+                  title.setTextSize(24);
+                  box.addView(title);
+
+                  box.addView(label(
+                          "1) فعّل الكيبورد  2) اختره  3) حط مفرداتك واحفظ  "
+                                  + "4) بأي تطبيق اضغط زر «كليشة» بالكيبورد وتنكتب لك كليشة جديدة.",
+                          false));
+
+                  Button enable = new Button(this);
+                  enable.setText("1) تفعيل الكيبورد");
+                  enable.setOnClickListener(new View.OnClickListener() {
+                      @Override
+                      public void onClick(View v) {
+                          startActivity(new Intent(Settings.ACTION_INPUT_METHOD_SETTINGS));
+                      }
+                  });
+                  box.addView(enable);
+
+                  Button pick = new Button(this);
+                  pick.setText("2) اختيار الكيبورد");
+                  pick.setOnClickListener(new View.OnClickListener() {
+                      @Override
+                      public void onClick(View v) {
+                          InputMethodManager imm =
+                                  (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
+                          if (imm != null) {
+                              imm.showInputMethodPicker();
+                          }
+                      }
+                  });
+                  box.addView(pick);
+
+                  box.addView(label("المفردات (كل سطر مفردة أو جملة)", true));
+                  final EditText words = new EditText(this);
+                  words.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE);
+                  words.setMinLines(8);
+                  words.setGravity(Gravity.TOP | Gravity.START);
+                  words.setText(sp.getString("words", ""));
+                  box.addView(words);
+
+                  box.addView(label("عدد الكلمات بكل كليشة", true));
+                  final EditText per = new EditText(this);
+                  per.setInputType(InputType.TYPE_CLASS_NUMBER);
+                  per.setText(String.valueOf(sp.getInt("per", 40)));
+                  box.addView(per);
+
+                  Button save = new Button(this);
+                  save.setText("حفظ");
+                  save.setOnClickListener(new View.OnClickListener() {
+                      @Override
+                      public void onClick(View v) {
+                          int n = 40;
+                          try {
+                              n = Integer.parseInt(per.getText().toString().trim());
+                          } catch (Exception ignored) {
+                          }
+                          if (n < 1) {
+                              n = 1;
+                          }
+                          if (n > 2000) {
+                              n = 2000;
+                          }
+                          sp.edit()
+                                  .putString("words", words.getText().toString())
+                                  .putInt("per", n)
+                                  .apply();
+                          Toast.makeText(MainActivity.this, "تم الحفظ", Toast.LENGTH_SHORT).show();
+                      }
+                  });
+                  box.addView(save);
+
+                  box.addView(label("جرّب الكيبورد هنا", true));
+                  EditText test = new EditText(this);
+                  test.setMinLines(3);
+                  test.setGravity(Gravity.TOP | Gravity.START);
+                  test.setHint("اكتب أو اضغط كليشة");
+                  box.addView(test);
+
+                  setContentView(scroll);
+              }
+          }
+          KEOF
+
+      - name: Add app icon
+        run: |
+          pip install pillow --break-system-packages -q
+          python3 - <<'PYEOF'
+          import os
+          from PIL import Image
+          src = None
+          for n in ("icon.png", "icon.jpg", "icon.jpeg", "icon.webp"):
+              if os.path.exists(n):
+                  src = n
+                  break
+          if src:
+              img = Image.open(src).convert("RGBA")
+              w, h = img.size
+              s = min(w, h)
+              left = (w - s) // 2
+              top = (h - s) // 2
+              img = img.crop((left, top, left + s, top + s))
+          else:
+              img = Image.new("RGBA", (512, 512), (14, 124, 123, 255))
+          sizes = {
+              "mdpi": 48,
+              "hdpi": 72,
+              "xhdpi": 96,
+              "xxhdpi": 144,
+              "xxxhdpi": 192,
+          }
+          for d, px in sizes.items():
+              out = "app/src/main/res/mipmap-" + d
+              os.makedirs(out, exist_ok=True)
+              img.resize((px, px), Image.LANCZOS).save(out + "/ic_launcher.png", "PNG")
+          print("icon source:", src or "default")
+          PYEOF
+
+      - name: Build APK
+        run: gradle assembleDebug --no-daemon
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: klisha-keyboard-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
